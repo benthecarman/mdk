@@ -42,8 +42,28 @@ const DEFAULT_EPOCH_LOOKBACK: u64 = 5;
 pub enum MessageProcessingResult {
     /// An application message (this is usually a message in a chat)
     ApplicationMessage(message_types::Message),
-    /// Proposal message
+    /// Proposal message that was auto-committed (self-remove proposals when receiver is admin)
     Proposal(UpdateGroupResult),
+    /// Pending proposal message stored but not committed
+    ///
+    /// For add/remove member proposals, these are always stored as pending so that
+    /// admins can approve them through a manual commit. For self-remove (leave) proposals,
+    /// these are stored as pending when the receiver is not an admin.
+    PendingProposal {
+        /// The MLS group ID this pending proposal belongs to
+        mls_group_id: GroupId,
+    },
+    /// Proposal was ignored and not stored
+    ///
+    /// This occurs for proposals that should not be processed, such as:
+    /// - Extension/ciphersuite change proposals (admins should create commits directly)
+    /// - Other unsupported proposal types
+    IgnoredProposal {
+        /// The MLS group ID this proposal was for
+        mls_group_id: GroupId,
+        /// Reason the proposal was ignored
+        reason: String,
+    },
     /// External Join Proposal
     ExternalJoinProposal {
         /// The MLS group ID this proposal belongs to
@@ -578,13 +598,12 @@ where
 
     /// Processes a proposal message from a group member
     ///
-    /// This internal function handles MLS proposal messages (add/remove member proposals).
-    /// Only admin members are allowed to submit proposals. The function:
-    /// 1. Validates the sender is a group member and has admin privileges
-    /// 2. Stores the pending proposal in the MLS group state
-    /// 3. Automatically commits the proposal to the group
-    /// 4. Creates a new encrypted event for the commit message
-    /// 5. Updates processing state to prevent reprocessing
+    /// This internal function handles MLS proposal messages according to the Marmot protocol:
+    ///
+    /// - **Add/Remove member proposals**: Always stored as pending for admin approval via manual commit
+    /// - **Self-remove (leave) proposals**: Auto-committed if receiver is admin, otherwise pending
+    /// - **Extension/ciphersuite proposals**: Ignored with warning (admins should create commits directly)
+    /// - **Update proposals**: Out of scope (see issue #59)
     ///
     /// # Arguments
     ///
@@ -594,82 +613,133 @@ where
     ///
     /// # Returns
     ///
-    /// * `Ok(UpdateGroupResult)` - Contains the commit event and any welcome messages
-    /// * `Err(Error)` - If proposal processing fails or sender lacks permissions
+    /// * `Ok(MessageProcessingResult::Proposal)` - Self-remove auto-committed by admin
+    /// * `Ok(MessageProcessingResult::PendingProposal)` - Proposal stored for admin approval
+    /// * `Ok(MessageProcessingResult::IgnoredProposal)` - Proposal ignored (extensions, etc.)
+    /// * `Err(Error)` - If proposal processing fails or sender is not a member
     fn process_proposal_message_for_group(
         &self,
         mls_group: &mut MlsGroup,
         event: &Event,
         staged_proposal: QueuedProposal,
-    ) -> Result<UpdateGroupResult> {
+    ) -> Result<MessageProcessingResult> {
         match staged_proposal.sender() {
-            Sender::Member(leaf_index) => {
-                let member = mls_group.member_at(*leaf_index);
+            Sender::Member(sender_leaf_index) => {
+                let member = mls_group.member_at(*sender_leaf_index);
 
                 match member {
-                    Some(member) => {
-                        // Only process proposals from admins for now
-                        if self.is_member_admin(&mls_group.group_id().into(), &member)? {
-                            // Validate that the proposal does not attempt to change identity
-                            // MIP-00 mandates immutable identity fields
-                            self.validate_proposal_identity(
-                                mls_group,
-                                staged_proposal.proposal(),
-                                staged_proposal.sender(),
-                            )?;
+                    Some(_member) => {
+                        let group_id: GroupId = mls_group.group_id().into();
+                        let own_leaf = mls_group.own_leaf().ok_or(Error::OwnLeafNotFound)?;
+                        let receiver_is_admin = self.is_leaf_node_admin(&group_id, own_leaf)?;
 
-                            mls_group
-                                .store_pending_proposal(self.provider.storage(), staged_proposal)
-                                .map_err(|e| Error::Message(e.to_string()))?;
+                        // Determine proposal type and how to handle it
+                        match staged_proposal.proposal() {
+                            Proposal::Add(_) => {
+                                // Add proposals: always store as pending for admin approval
+                                self.store_pending_proposal_and_mark_processed(
+                                    mls_group,
+                                    event,
+                                    staged_proposal,
+                                    &group_id,
+                                )?;
 
-                            let _added_members =
-                                self.pending_added_members_pubkeys(&mls_group.group_id().into())?;
+                                tracing::debug!(
+                                    target: "mdk_core::messages::process_proposal_message_for_group",
+                                    "Stored Add proposal as pending for admin approval in group {:?}",
+                                    group_id
+                                );
 
-                            let mls_signer = self.load_mls_signer(mls_group)?;
-
-                            let (commit_message, welcomes_option, _group_info) = mls_group
-                                .commit_to_pending_proposals(&self.provider, &mls_signer)?;
-
-                            let serialized_commit_message = commit_message
-                                .tls_serialize_detached()
-                                .map_err(|e| Error::Group(e.to_string()))?;
-
-                            let commit_event = self.build_encrypted_message_event(
-                                &mls_group.group_id().into(),
-                                serialized_commit_message,
-                            )?;
-
-                            // TODO: FUTURE Handle welcome rumors from proposals
-                            // The issue is that we don't have the key_package events to get the event id to
-                            // include in the welcome rumor to allow users to clean up those key packages on relays
-                            let welcome_rumors: Option<Vec<UnsignedEvent>> = None;
-                            if welcomes_option.is_some() {
-                                return Err(Error::NotImplemented(
-                                    "Processing welcome rumors from proposals is not supported"
-                                        .to_string(),
-                                ));
+                                Ok(MessageProcessingResult::PendingProposal {
+                                    mls_group_id: group_id,
+                                })
                             }
+                            Proposal::Remove(remove_proposal) => {
+                                // Check if this is a self-remove (leave) proposal
+                                let removed_leaf_index = remove_proposal.removed();
+                                let is_self_remove = *sender_leaf_index == removed_leaf_index;
 
-                            // Save a processed message so we don't reprocess
-                            let processed_message = message_types::ProcessedMessage {
-                                wrapper_event_id: event.id,
-                                message_event_id: None,
-                                processed_at: Timestamp::now(),
-                                state: message_types::ProcessedMessageState::Processed,
-                                failure_reason: None,
-                            };
+                                if is_self_remove && receiver_is_admin {
+                                    // Self-remove proposal + admin receiver: auto-commit
+                                    self.store_and_commit_proposal(
+                                        mls_group,
+                                        event,
+                                        staged_proposal,
+                                        &group_id,
+                                    )
+                                } else {
+                                    // Either not self-remove, or receiver is not admin
+                                    // Store as pending for admin approval
+                                    self.store_pending_proposal_and_mark_processed(
+                                        mls_group,
+                                        event,
+                                        staged_proposal,
+                                        &group_id,
+                                    )?;
 
-                            self.storage()
-                                .save_processed_message(processed_message)
-                                .map_err(|e| Error::Message(e.to_string()))?;
+                                    if is_self_remove {
+                                        tracing::debug!(
+                                            target: "mdk_core::messages::process_proposal_message_for_group",
+                                            "Non-admin receiver stored self-remove proposal as pending for group {:?}",
+                                            group_id
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            target: "mdk_core::messages::process_proposal_message_for_group",
+                                            "Stored Remove proposal as pending for admin approval in group {:?}",
+                                            group_id
+                                        );
+                                    }
 
-                            Ok(UpdateGroupResult {
-                                evolution_event: commit_event,
-                                welcome_rumors,
-                                mls_group_id: mls_group.group_id().into(),
-                            })
-                        } else {
-                            Err(Error::ProposalFromNonAdmin)
+                                    Ok(MessageProcessingResult::PendingProposal {
+                                        mls_group_id: group_id,
+                                    })
+                                }
+                            }
+                            Proposal::Update(_) => {
+                                // Update proposals (self key rotation) - out of scope for this issue
+                                // See: https://github.com/marmot-protocol/mdk/issues/59
+                                tracing::warn!(
+                                    target: "mdk_core::messages::process_proposal_message_for_group",
+                                    "Ignoring Update proposal - self-update handling not yet implemented (see issue #59)"
+                                );
+
+                                self.mark_event_processed(event)?;
+
+                                Ok(MessageProcessingResult::IgnoredProposal {
+                                    mls_group_id: group_id,
+                                    reason: "Update proposals not yet supported (see issue #59)"
+                                        .to_string(),
+                                })
+                            }
+                            Proposal::GroupContextExtensions(_) => {
+                                // Extension proposals should be ignored - admins create commits directly
+                                tracing::warn!(
+                                    target: "mdk_core::messages::process_proposal_message_for_group",
+                                    "Ignoring GroupContextExtensions proposal - admins should create commits directly"
+                                );
+
+                                self.mark_event_processed(event)?;
+
+                                Ok(MessageProcessingResult::IgnoredProposal {
+                                    mls_group_id: group_id,
+                                    reason: "Extension proposals not allowed - admins should create commits directly".to_string(),
+                                })
+                            }
+                            _ => {
+                                // Other proposal types (PreSharedKey, ReInit, ExternalInit, etc.)
+                                tracing::warn!(
+                                    target: "mdk_core::messages::process_proposal_message_for_group",
+                                    "Ignoring unsupported proposal type"
+                                );
+
+                                self.mark_event_processed(event)?;
+
+                                Ok(MessageProcessingResult::IgnoredProposal {
+                                    mls_group_id: group_id,
+                                    reason: "Unsupported proposal type".to_string(),
+                                })
+                            }
                         }
                     }
                     None => {
@@ -697,6 +767,77 @@ where
                 ))
             }
         }
+    }
+
+    /// Stores a proposal as pending and marks the event as processed
+    fn store_pending_proposal_and_mark_processed(
+        &self,
+        mls_group: &mut MlsGroup,
+        event: &Event,
+        staged_proposal: QueuedProposal,
+        _group_id: &GroupId,
+    ) -> Result<()> {
+        mls_group
+            .store_pending_proposal(self.provider.storage(), staged_proposal)
+            .map_err(|e| Error::Message(e.to_string()))?;
+
+        self.mark_event_processed(event)
+    }
+
+    /// Marks an event as processed to prevent reprocessing
+    fn mark_event_processed(&self, event: &Event) -> Result<()> {
+        let processed_message = message_types::ProcessedMessage {
+            wrapper_event_id: event.id,
+            message_event_id: None,
+            processed_at: Timestamp::now(),
+            state: message_types::ProcessedMessageState::Processed,
+            failure_reason: None,
+        };
+
+        self.storage()
+            .save_processed_message(processed_message)
+            .map_err(|e| Error::Message(e.to_string()))
+    }
+
+    /// Stores a proposal and immediately commits it (for self-remove by admin)
+    fn store_and_commit_proposal(
+        &self,
+        mls_group: &mut MlsGroup,
+        event: &Event,
+        staged_proposal: QueuedProposal,
+        group_id: &GroupId,
+    ) -> Result<MessageProcessingResult> {
+        mls_group
+            .store_pending_proposal(self.provider.storage(), staged_proposal)
+            .map_err(|e| Error::Message(e.to_string()))?;
+
+        let mls_signer = self.load_mls_signer(mls_group)?;
+
+        // Self-remove proposals never generate welcomes (only Add proposals do),
+        // so we can safely ignore the welcome output here
+        let (commit_message, _welcomes, _group_info) =
+            mls_group.commit_to_pending_proposals(&self.provider, &mls_signer)?;
+
+        let serialized_commit_message = commit_message
+            .tls_serialize_detached()
+            .map_err(|e| Error::Group(e.to_string()))?;
+
+        let commit_event =
+            self.build_encrypted_message_event(group_id, serialized_commit_message)?;
+
+        self.mark_event_processed(event)?;
+
+        tracing::debug!(
+            target: "mdk_core::messages::process_proposal_message_for_group",
+            "Admin auto-committed self-remove proposal for group {:?}",
+            group_id
+        );
+
+        Ok(MessageProcessingResult::Proposal(UpdateGroupResult {
+            evolution_event: commit_event,
+            welcome_rumors: None,
+            mls_group_id: group_id.clone(),
+        }))
     }
 
     /// Processes a commit message from a group member
@@ -874,13 +1015,7 @@ where
                         ))
                     }
                     ProcessedMessageContent::ProposalMessage(staged_proposal) => {
-                        Ok(MessageProcessingResult::Proposal(
-                            self.process_proposal_message_for_group(
-                                mls_group,
-                                event,
-                                *staged_proposal,
-                            )?,
-                        ))
+                        self.process_proposal_message_for_group(mls_group, event, *staged_proposal)
                     }
                     ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                         self.process_commit_message_for_group(
@@ -1732,6 +1867,10 @@ mod tests {
         let unprocessable_result = MessageProcessingResult::Unprocessable {
             mls_group_id: test_group_id.clone(),
         };
+        // PendingProposal: for when a non-admin receiver stores a proposal without committing
+        let pending_proposal_result = MessageProcessingResult::PendingProposal {
+            mls_group_id: test_group_id.clone(),
+        };
 
         // Test that we can match on variants
         match app_result {
@@ -1752,6 +1891,11 @@ mod tests {
         match unprocessable_result {
             MessageProcessingResult::Unprocessable { .. } => {}
             _ => panic!("Expected Unprocessable variant"),
+        }
+
+        match pending_proposal_result {
+            MessageProcessingResult::PendingProposal { .. } => {}
+            _ => panic!("Expected PendingProposal variant"),
         }
     }
 
@@ -4185,6 +4329,8 @@ mod tests {
     /// legitimate commits.
     #[test]
     fn test_commit_processing_validates_identity_multi_member() {
+        use crate::test_util::create_key_package_event;
+
         let alice_keys = Keys::generate();
         let bob_keys = Keys::generate();
 
@@ -4262,6 +4408,175 @@ mod tests {
             alice_identity,
             alice_keys.public_key(),
             "Alice's identity should be preserved after self_update"
+        );
+    }
+
+    /// Tests that self-leave proposals are auto-committed when processed by an admin.
+    /// Per the Marmot protocol, admins should auto-commit self-leave proposals.
+    #[test]
+    fn test_self_leave_proposal_auto_committed_by_admin() {
+        use crate::test_util::create_key_package_event;
+
+        // Setup: Alice (admin), Bob (non-admin member)
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+
+        let alice_mdk = create_test_mdk();
+        let bob_mdk = create_test_mdk();
+
+        // Only Alice is admin
+        let admins = vec![alice_keys.public_key()];
+
+        let bob_key_package = create_key_package_event(&bob_mdk, &bob_keys);
+
+        let create_result = alice_mdk
+            .create_group(
+                &alice_keys.public_key(),
+                vec![bob_key_package],
+                create_nostr_group_config_data(admins),
+            )
+            .expect("Alice should create group");
+
+        let group_id = create_result.group.mls_group_id.clone();
+
+        alice_mdk
+            .merge_pending_commit(&group_id)
+            .expect("Alice should merge commit");
+
+        // Bob joins the group
+        let bob_welcome = &create_result.welcome_rumors[0];
+        let bob_welcome_preview = bob_mdk
+            .process_welcome(&nostr::EventId::all_zeros(), bob_welcome)
+            .expect("Bob should process welcome");
+        bob_mdk
+            .accept_welcome(&bob_welcome_preview)
+            .expect("Bob should accept welcome");
+
+        // Bob leaves the group (creates a leave proposal)
+        let bob_leave_result = bob_mdk
+            .leave_group(&group_id)
+            .expect("Bob should be able to leave");
+
+        // Alice (admin) processes Bob's leave proposal
+        // This should auto-commit and return Proposal variant
+        let process_result = alice_mdk
+            .process_message(&bob_leave_result.evolution_event)
+            .expect("Alice should process Bob's leave");
+
+        // Verify it returns Proposal (indicating auto-commit happened)
+        assert!(
+            matches!(process_result, MessageProcessingResult::Proposal(_)),
+            "Admin processing self-leave should return Proposal (auto-committed), got: {:?}",
+            process_result
+        );
+
+        // Extract the commit event from the result
+        let commit_event = match process_result {
+            MessageProcessingResult::Proposal(update_result) => update_result.evolution_event,
+            _ => panic!("Expected Proposal variant"),
+        };
+
+        // The pending proposal is cleared after merge_pending_commit is called
+        // (which happens after the commit is published to relays)
+        alice_mdk
+            .merge_pending_commit(&group_id)
+            .expect("Should merge pending commit");
+
+        // Verify no pending proposals remain after merge
+        let pending = alice_mdk
+            .pending_removed_members_pubkeys(&group_id)
+            .expect("Should get pending");
+        assert!(pending.is_empty(), "No pending removals after merge");
+
+        // Verify the commit event has the correct structure
+        assert_eq!(
+            commit_event.kind,
+            nostr::Kind::MlsGroupMessage,
+            "Commit event should be MLS group message"
+        );
+    }
+
+    /// Tests that self-leave proposals are stored as pending when processed by a non-admin.
+    /// Non-admin members cannot commit, so they store the proposal for later admin approval.
+    #[test]
+    fn test_self_leave_proposal_stored_pending_by_non_admin() {
+        use crate::test_util::create_key_package_event;
+
+        // Setup: Alice (admin), Bob (non-admin), Charlie (non-admin)
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let charlie_keys = Keys::generate();
+
+        let alice_mdk = create_test_mdk();
+        let bob_mdk = create_test_mdk();
+        let charlie_mdk = create_test_mdk();
+
+        // Only Alice is admin
+        let admins = vec![alice_keys.public_key()];
+
+        let bob_key_package = create_key_package_event(&bob_mdk, &bob_keys);
+        let charlie_key_package = create_key_package_event(&charlie_mdk, &charlie_keys);
+
+        let create_result = alice_mdk
+            .create_group(
+                &alice_keys.public_key(),
+                vec![bob_key_package, charlie_key_package],
+                create_nostr_group_config_data(admins),
+            )
+            .expect("Alice should create group");
+
+        let group_id = create_result.group.mls_group_id.clone();
+
+        alice_mdk
+            .merge_pending_commit(&group_id)
+            .expect("Alice should merge commit");
+
+        // Bob and Charlie join
+        let bob_welcome = &create_result.welcome_rumors[0];
+        let charlie_welcome = &create_result.welcome_rumors[1];
+
+        let bob_welcome_preview = bob_mdk
+            .process_welcome(&nostr::EventId::all_zeros(), bob_welcome)
+            .expect("Bob should process welcome");
+        bob_mdk
+            .accept_welcome(&bob_welcome_preview)
+            .expect("Bob should accept welcome");
+
+        let charlie_welcome_preview = charlie_mdk
+            .process_welcome(&nostr::EventId::all_zeros(), charlie_welcome)
+            .expect("Charlie should process welcome");
+        charlie_mdk
+            .accept_welcome(&charlie_welcome_preview)
+            .expect("Charlie should accept welcome");
+
+        // Bob leaves (creates proposal)
+        let bob_leave_result = bob_mdk.leave_group(&group_id).expect("Bob should leave");
+
+        // Charlie (non-admin) processes the leave proposal
+        // This should store as pending and return PendingProposal variant
+        let process_result = charlie_mdk
+            .process_message(&bob_leave_result.evolution_event)
+            .expect("Charlie should process leave");
+
+        // Verify it returns PendingProposal (indicating it was stored, not committed)
+        assert!(
+            matches!(
+                process_result,
+                MessageProcessingResult::PendingProposal { .. }
+            ),
+            "Non-admin processing self-leave should return PendingProposal, got: {:?}",
+            process_result
+        );
+
+        // Verify the proposal is now pending
+        let pending = charlie_mdk
+            .pending_removed_members_pubkeys(&group_id)
+            .expect("Should get pending");
+        assert_eq!(pending.len(), 1, "Bob should be in pending removals");
+        assert_eq!(
+            pending[0],
+            bob_keys.public_key(),
+            "Pending removal should be Bob"
         );
     }
 
@@ -4389,6 +4704,8 @@ mod tests {
     /// remove_members commits.
     #[test]
     fn test_remove_members_commit_triggers_identity_validation() {
+        use crate::test_util::create_key_package_event;
+
         let alice_keys = Keys::generate();
         let bob_keys = Keys::generate();
         let charlie_keys = Keys::generate();
@@ -4401,7 +4718,7 @@ mod tests {
         let bob_key_package = create_key_package_event(&bob_mdk, &bob_keys);
         let charlie_key_package = create_key_package_event(&charlie_mdk, &charlie_keys);
 
-        // Alice creates group with Bob and Charlie
+        // Alice creates group with Bob and Charlie (Alice is admin)
         let admin_pubkeys = vec![alice_keys.public_key()];
         let config = create_nostr_group_config_data(admin_pubkeys);
 

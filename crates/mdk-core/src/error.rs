@@ -160,9 +160,6 @@ pub enum Error {
     /// Stored message not found
     #[error("stored message not found")]
     MessageNotFound,
-    /// Proposal message received from a non-admin
-    #[error("not processing proposal from non-admin")]
-    ProposalFromNonAdmin,
     /// Commit message received from a non-admin
     #[error("not processing commit from non-admin")]
     CommitFromNonAdmin,
@@ -422,9 +419,6 @@ mod tests {
 
         let error = Error::MessageNotFound;
         assert_eq!(error.to_string(), "stored message not found");
-
-        let error = Error::ProposalFromNonAdmin;
-        assert_eq!(error.to_string(), "not processing proposal from non-admin");
 
         let error = Error::CommitFromNonAdmin;
         assert_eq!(error.to_string(), "not processing commit from non-admin");
