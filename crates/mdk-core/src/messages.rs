@@ -1960,6 +1960,38 @@ where
         }
     }
 
+    /// Extracts the MLS group ID from a previously failed message event
+    ///
+    /// This helper attempts to extract the group ID from the event's h-tag and look it up
+    /// in storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The event to extract the group ID from
+    ///
+    /// # Returns
+    ///
+    /// `Some(GroupId)` if extraction succeeds (from storage or derived from Nostr group ID),
+    /// `None` if the h-tag is missing, malformed, or cannot be decoded.
+    fn extract_group_id_from_failed_message(&self, event: &Event) -> Option<GroupId> {
+        event
+            .tags
+            .iter()
+            .find(|tag| tag.kind() == TagKind::h())
+            .and_then(|tag| tag.content())
+            .filter(|hex_str| hex_str.len() == 64)
+            .and_then(|hex_str| hex::decode(hex_str).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .and_then(|nostr_group_id: [u8; 32]| {
+                self.storage()
+                    .find_group_by_nostr_group_id(&nostr_group_id)
+                    .ok()
+                    .flatten()
+                    .map(|group| group.mls_group_id)
+                    .or_else(|| Some(GroupId::from_slice(&nostr_group_id)))
+            })
+    }
+
     /// Processes an incoming encrypted Nostr event containing an MLS message
     ///
     /// This is the main entry point for processing received messages. The function orchestrates
@@ -1998,17 +2030,26 @@ where
             // Other states (Created, Processed, ProcessedCommit) should continue
             // to allow normal message flow (e.g., processing own messages from relay)
             if processed.state == message_types::ProcessedMessageState::Failed {
-                // Log the stored failure reason internally for debugging
-                tracing::debug!(
-                    target: "mdk_core::messages::process_message",
-                    "Rejecting previously failed message with reason: {}",
-                    processed.failure_reason.as_deref().unwrap_or("unknown")
-                );
+                let mls_group_id = match self.extract_group_id_from_failed_message(event) {
+                    Some(id) => {
+                        tracing::debug!(
+                            target: "mdk_core::messages::process_message",
+                            "Returning Unprocessable for previously failed message with extracted group_id"
+                        );
+                        id
+                    }
+                    None => {
+                        tracing::debug!(
+                            target: "mdk_core::messages::process_message",
+                            "Cannot extract group_id from previously failed message (missing or malformed h-tag)"
+                        );
+                        return Err(Error::Message(
+                            "Message processing previously failed".to_string(),
+                        ));
+                    }
+                };
 
-                // Return generic error to avoid leaking internal details
-                return Err(Error::Message(
-                    "Message processing previously failed".to_string(),
-                ));
+                return Ok(MessageProcessingResult::Unprocessable { mls_group_id });
             }
         }
 
@@ -6053,12 +6094,15 @@ mod tests {
     ///
     /// This test verifies the deduplication mechanism prevents reprocessing
     /// of previously failed events, mitigating DoS attacks.
+    ///
+    /// When a previously failed message cannot provide a valid group_id (missing or
+    /// malformed h-tag), we return an error to be explicit about the failure.
     #[test]
     fn test_repeated_validation_failure_rejected_immediately() {
         let mdk = create_test_mdk();
         let keys = Keys::generate();
 
-        // Create an event with wrong kind
+        // Create an event with wrong kind (no group_id tag)
         let event = EventBuilder::new(Kind::Metadata, "")
             .sign_with_keys(&keys)
             .unwrap();
@@ -6068,14 +6112,18 @@ mod tests {
         assert!(result1.is_err(), "First attempt should fail validation");
 
         // Second attempt - should be rejected immediately via deduplication
+        // Returns error because group_id cannot be extracted from malformed event
         let result2 = mdk.process_message(&event);
-        assert!(result2.is_err(), "Second attempt should also fail");
+        assert!(
+            result2.is_err(),
+            "Second attempt should return error for malformed event without valid h-tag"
+        );
         assert!(
             result2
                 .unwrap_err()
                 .to_string()
                 .contains("Message processing previously failed"),
-            "Error should indicate previous failure"
+            "Should indicate message previously failed"
         );
     }
 
@@ -6146,14 +6194,283 @@ mod tests {
         assert!(result1.is_err(), "First attempt should fail decryption");
 
         // Second attempt - should be rejected immediately via deduplication
+        // After fix: Returns Ok(Unprocessable) instead of Err
         let result2 = mdk.process_message(&event);
-        assert!(result2.is_err(), "Second attempt should also fail");
+        assert!(
+            result2.is_ok(),
+            "Second attempt should return Ok(Unprocessable)"
+        );
+        assert!(
+            matches!(
+                result2.unwrap(),
+                MessageProcessingResult::Unprocessable { .. }
+            ),
+            "Should return Unprocessable for previously failed message"
+        );
+    }
+
+    /// Test that previously failed message with valid group_id returns Unprocessable with correct group_id
+    ///
+    /// This test verifies that when a previously failed message has a valid group_id tag,
+    /// the Unprocessable result contains the correct group_id.
+    #[test]
+    fn test_previously_failed_message_with_valid_group_id() {
+        let mdk = create_test_mdk();
+        let keys = Keys::generate();
+
+        // Create a valid group_id
+        let group_id_bytes = [42u8; 32];
+        let group_id_hex = hex::encode(group_id_bytes);
+
+        // Create an event with valid group_id tag but invalid content
+        let tag = Tag::custom(TagKind::h(), [group_id_hex.clone()]);
+        let event = EventBuilder::new(Kind::MlsGroupMessage, "invalid_encrypted_content")
+            .tag(tag)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // First attempt - will fail (group doesn't exist)
+        let result1 = mdk.process_message(&event);
+        assert!(result1.is_err(), "First attempt should fail");
+
+        // Verify failed state was persisted
+        let processed = mdk
+            .storage()
+            .find_processed_message_by_event_id(&event.id)
+            .unwrap()
+            .expect("Failed record should exist");
+        assert_eq!(
+            processed.state,
+            message_types::ProcessedMessageState::Failed,
+            "State should be Failed"
+        );
+
+        // Second attempt - should return Unprocessable with the correct group_id
+        let result2 = mdk.process_message(&event);
+        assert!(
+            result2.is_ok(),
+            "Second attempt should return Ok(Unprocessable)"
+        );
+
+        match result2.unwrap() {
+            MessageProcessingResult::Unprocessable { mls_group_id } => {
+                // Verify it extracted the correct group_id
+                assert_eq!(
+                    mls_group_id.as_slice(),
+                    &group_id_bytes,
+                    "Should extract correct group_id from event"
+                );
+            }
+            other => panic!("Expected Unprocessable, got: {:?}", other),
+        }
+    }
+
+    /// Test that previously failed message with oversized hex in h-tag returns error
+    ///
+    /// This test verifies that when a previously failed message has an oversized hex string
+    /// in the h-tag (potential DoS vector), the size check prevents decoding and returns
+    /// an explicit error.
+    #[test]
+    fn test_previously_failed_message_with_oversized_hex() {
+        let mdk = create_test_mdk();
+        let keys = Keys::generate();
+
+        // Create an oversized hex string (128 chars instead of 64)
+        let oversized_hex = "a".repeat(128);
+        let tag = Tag::custom(TagKind::h(), [oversized_hex]);
+        let event = EventBuilder::new(Kind::MlsGroupMessage, "invalid_content")
+            .tag(tag)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // First attempt - will fail
+        let result1 = mdk.process_message(&event);
+        assert!(result1.is_err(), "First attempt should fail");
+
+        // Verify failed state was persisted
+        let processed = mdk
+            .storage()
+            .find_processed_message_by_event_id(&event.id)
+            .unwrap()
+            .expect("Failed record should exist");
+        assert_eq!(
+            processed.state,
+            message_types::ProcessedMessageState::Failed
+        );
+
+        // Second attempt - should return error due to malformed h-tag
+        let result2 = mdk.process_message(&event);
+        assert!(
+            result2.is_err(),
+            "Second attempt should return error for oversized hex"
+        );
         assert!(
             result2
                 .unwrap_err()
                 .to_string()
                 .contains("Message processing previously failed"),
-            "Error should indicate previous failure"
+            "Should indicate message previously failed"
+        );
+    }
+
+    /// Test that previously failed message with undersized hex in h-tag returns error
+    ///
+    /// This test verifies that when a previously failed message has an undersized hex string
+    /// in the h-tag, the size check prevents decoding and returns an explicit error.
+    #[test]
+    fn test_previously_failed_message_with_undersized_hex() {
+        let mdk = create_test_mdk();
+        let keys = Keys::generate();
+
+        // Create an undersized hex string (32 chars instead of 64)
+        let undersized_hex = "a".repeat(32);
+        let tag = Tag::custom(TagKind::h(), [undersized_hex]);
+        let event = EventBuilder::new(Kind::MlsGroupMessage, "invalid_content")
+            .tag(tag)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // First attempt - will fail
+        let result1 = mdk.process_message(&event);
+        assert!(result1.is_err(), "First attempt should fail");
+
+        // Verify failed state was persisted
+        let processed = mdk
+            .storage()
+            .find_processed_message_by_event_id(&event.id)
+            .unwrap()
+            .expect("Failed record should exist");
+        assert_eq!(
+            processed.state,
+            message_types::ProcessedMessageState::Failed
+        );
+
+        // Second attempt - should return error due to malformed h-tag
+        let result2 = mdk.process_message(&event);
+        assert!(
+            result2.is_err(),
+            "Second attempt should return error for undersized hex"
+        );
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("Message processing previously failed"),
+            "Should indicate message previously failed"
+        );
+    }
+
+    /// Test that previously failed message with group in storage returns correct MLS group ID
+    ///
+    /// This test verifies that when a group exists in storage, the code looks up and returns
+    /// the actual MLS group ID (not just the Nostr group ID).
+    #[test]
+    fn test_previously_failed_message_with_group_in_storage() {
+        let mdk = create_test_mdk();
+        let (creator, members, admins) = create_test_group_members();
+
+        // Create a real group in storage
+        let group_id = create_test_group(&mdk, &creator, &members, &admins);
+
+        // Get the group to extract its nostr_group_id
+        let group = mdk
+            .get_group(&group_id)
+            .expect("Failed to get group")
+            .expect("Group should exist");
+        let nostr_group_id_hex = hex::encode(group.nostr_group_id);
+
+        // Create an event with the group's nostr_group_id but invalid content
+        let keys = Keys::generate();
+        let tag = Tag::custom(TagKind::h(), [nostr_group_id_hex]);
+        let event = EventBuilder::new(Kind::MlsGroupMessage, "invalid_encrypted_content")
+            .tag(tag)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // First attempt - will fail (invalid content)
+        let result1 = mdk.process_message(&event);
+        assert!(result1.is_err(), "First attempt should fail");
+
+        // Verify failed state was persisted
+        let processed = mdk
+            .storage()
+            .find_processed_message_by_event_id(&event.id)
+            .unwrap()
+            .expect("Failed record should exist");
+        assert_eq!(
+            processed.state,
+            message_types::ProcessedMessageState::Failed
+        );
+
+        // Second attempt - should return Unprocessable with the MLS group ID from storage
+        let result2 = mdk.process_message(&event);
+        assert!(
+            result2.is_ok(),
+            "Second attempt should return Ok(Unprocessable)"
+        );
+
+        match result2.unwrap() {
+            MessageProcessingResult::Unprocessable { mls_group_id } => {
+                // Verify it returned the actual MLS group ID from storage
+                assert_eq!(
+                    mls_group_id, group_id,
+                    "Should return MLS group ID from storage, not Nostr group ID"
+                );
+            }
+            other => panic!("Expected Unprocessable, got: {:?}", other),
+        }
+    }
+
+    /// Test that previously failed message with invalid hex characters returns error
+    ///
+    /// This test verifies that when hex::decode fails due to invalid characters,
+    /// the code returns an explicit error.
+    #[test]
+    fn test_previously_failed_message_with_invalid_hex_chars() {
+        let mdk = create_test_mdk();
+        let keys = Keys::generate();
+
+        // Create invalid hex string (64 chars but contains non-hex characters like 'z')
+        let invalid_hex = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        assert_eq!(
+            invalid_hex.len(),
+            64,
+            "Should be 64 chars to pass length check"
+        );
+
+        let tag = Tag::custom(TagKind::h(), [invalid_hex]);
+        let event = EventBuilder::new(Kind::MlsGroupMessage, "invalid_content")
+            .tag(tag)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // First attempt - will fail
+        let result1 = mdk.process_message(&event);
+        assert!(result1.is_err(), "First attempt should fail");
+
+        // Verify failed state was persisted
+        let processed = mdk
+            .storage()
+            .find_processed_message_by_event_id(&event.id)
+            .unwrap()
+            .expect("Failed record should exist");
+        assert_eq!(
+            processed.state,
+            message_types::ProcessedMessageState::Failed
+        );
+
+        // Second attempt - should return error due to invalid hex
+        let result2 = mdk.process_message(&event);
+        assert!(
+            result2.is_err(),
+            "Second attempt should return error for invalid hex chars"
+        );
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("Message processing previously failed"),
+            "Should indicate message previously failed"
         );
     }
 
@@ -7244,6 +7561,63 @@ mod tests {
             bob_mdk
                 .merge_pending_commit(&group_id)
                 .unwrap_or_else(|e| panic!("Bob should merge self-update {}: {:?}", i + 1, e));
+        }
+    }
+
+    #[test]
+    fn test_previously_failed_message_returns_unprocessable_not_error() {
+        // Setup: Create MDK and a test group
+        let mdk = create_test_mdk();
+        let (creator, members, admins) = create_test_group_members();
+        let group_id = create_test_group(&mdk, &creator, &members, &admins);
+
+        // Create a test message event
+        let rumor = create_test_rumor(&creator, "Test message");
+        let event = mdk
+            .create_message(&group_id, rumor)
+            .expect("Failed to create message");
+
+        // Manually mark the message as failed in storage
+        // This simulates a message that previously failed processing
+        let processed_message = message_types::ProcessedMessage {
+            wrapper_event_id: event.id,
+            message_event_id: None,
+            processed_at: Timestamp::now(),
+            epoch: None,
+            mls_group_id: None,
+            state: message_types::ProcessedMessageState::Failed,
+            failure_reason: Some("Simulated failure for test".to_string()),
+        };
+
+        mdk.storage()
+            .save_processed_message(processed_message)
+            .expect("Failed to save processed message");
+
+        // Try to process the message again
+        // Before the fix: This would return Err() and crash apps
+        // After the fix: This should return Ok(Unprocessable)
+        let result = mdk.process_message(&event);
+
+        // Assert: Should return Ok with Unprocessable, not Err
+        assert!(
+            result.is_ok(),
+            "Should not throw error for previously failed message, got error: {:?}",
+            result.as_ref().err()
+        );
+
+        // Verify it returns Unprocessable variant
+        match result.unwrap() {
+            MessageProcessingResult::Unprocessable { mls_group_id } => {
+                // Just verify we got a valid group_id (not empty)
+                assert!(
+                    !mls_group_id.as_slice().is_empty(),
+                    "Should return a non-empty group ID"
+                );
+            }
+            other => panic!(
+                "Expected MessageProcessingResult::Unprocessable, got: {:?}",
+                other
+            ),
         }
     }
 
