@@ -10,14 +10,18 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![doc = include_str!("../README.md")]
 
+use std::sync::Arc;
+
 use mdk_storage_traits::MdkStorageProvider;
 use openmls::prelude::*;
 use openmls_rust_crypto::RustCrypto;
 
+pub mod callback;
 mod constant;
 #[cfg(feature = "mip04")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mip04")))]
 pub mod encrypted_media;
+pub mod epoch_snapshots;
 pub mod error;
 pub mod extension;
 pub mod groups;
@@ -30,9 +34,11 @@ pub mod test_util;
 mod util;
 pub mod welcomes;
 
+use self::callback::{MdkCallback, RollbackInfo};
 use self::constant::{
     DEFAULT_CIPHERSUITE, GROUP_CONTEXT_REQUIRED_EXTENSIONS, SUPPORTED_EXTENSIONS,
 };
+use self::epoch_snapshots::EpochSnapshotManager;
 pub use self::error::Error;
 use self::util::NostrTagFormat;
 
@@ -114,6 +120,23 @@ pub struct MdkConfig {
     /// computation to advance the ratchet when catching up. The default of 1000
     /// handles most message loss scenarios while keeping catch-up costs reasonable.
     pub maximum_forward_distance: u32,
+
+    /// Number of epoch snapshots to retain for rollback support.
+    ///
+    /// Enables recovery when a better commit arrives late by allowing the
+    /// client to rollback to a previous epoch state and re-apply commits.
+    ///
+    /// Default: 5
+    pub epoch_snapshot_retention: usize,
+
+    /// Time-to-live for snapshots in seconds.
+    ///
+    /// Snapshots older than this will be pruned on startup to prevent
+    /// indefinite storage growth. This ensures that cryptographic key
+    /// material in snapshots doesn't persist longer than necessary.
+    ///
+    /// Default: 604800 (1 week)
+    pub snapshot_ttl_seconds: u64,
 }
 
 impl Default for MdkConfig {
@@ -123,6 +146,8 @@ impl Default for MdkConfig {
             max_future_skew_secs: 300,      // 5 minutes
             out_of_order_tolerance: 100,    // 100 past messages
             maximum_forward_distance: 1000, // 1000 forward messages
+            epoch_snapshot_retention: 5,
+            snapshot_ttl_seconds: 604800, // 1 week
         }
     }
 }
@@ -157,6 +182,7 @@ impl MdkConfig {
 pub struct MdkBuilder<Storage> {
     storage: Storage,
     config: MdkConfig,
+    callback: Option<Arc<dyn MdkCallback>>,
 }
 
 impl<Storage> MdkBuilder<Storage>
@@ -168,6 +194,7 @@ where
         Self {
             storage,
             config: MdkConfig::default(),
+            callback: None,
         }
     }
 
@@ -188,8 +215,36 @@ where
         self
     }
 
+    /// Set a callback for MDK events
+    pub fn with_callback(mut self, callback: Arc<dyn MdkCallback>) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+
     /// Build the MDK instance with the configured settings
     pub fn build(self) -> MDK<Storage> {
+        // Prune expired snapshots on startup for persistent backends
+        if self.storage.backend().is_persistent() {
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("System time before Unix epoch")
+                .as_secs();
+            let min_timestamp = current_time.saturating_sub(self.config.snapshot_ttl_seconds);
+            if let Ok(pruned_count) = self.storage.prune_expired_snapshots(min_timestamp)
+                && pruned_count > 0
+            {
+                tracing::info!(
+                    pruned = pruned_count,
+                    ttl_seconds = self.config.snapshot_ttl_seconds,
+                    "Pruned expired snapshots on startup"
+                );
+            }
+        }
+
+        let epoch_snapshots = Arc::new(EpochSnapshotManager::new(
+            self.config.epoch_snapshot_retention,
+        ));
+
         MDK {
             ciphersuite: DEFAULT_CIPHERSUITE,
             extensions: SUPPORTED_EXTENSIONS.to_vec(),
@@ -198,6 +253,8 @@ where
                 storage: self.storage,
             },
             config: self.config,
+            epoch_snapshots,
+            callback: self.callback,
         }
     }
 }
@@ -224,6 +281,10 @@ where
     pub provider: MdkProvider<Storage>,
     /// Configuration for encoding behavior
     pub config: MdkConfig,
+    /// Snapshot manager for rollback support
+    epoch_snapshots: Arc<EpochSnapshotManager>,
+    /// Optional callback for events
+    callback: Option<Arc<dyn MdkCallback>>,
 }
 
 /// Provider implementation for OpenMLS that integrates with Nostr.
@@ -516,6 +577,8 @@ pub mod tests {
                 maximum_forward_distance: 500,
                 max_event_age_secs: 86400,
                 max_future_skew_secs: 120,
+                epoch_snapshot_retention: 5,
+                snapshot_ttl_seconds: 604800,
             };
 
             let alice_keys = Keys::generate();
