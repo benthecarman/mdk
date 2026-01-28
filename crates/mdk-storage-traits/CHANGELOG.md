@@ -25,7 +25,11 @@
 
 ## Unreleased
 
+### Added
+
 ### Breaking changes
+
+- **Retryable Message State**: Added `ProcessedMessageState::Retryable` variant and `MessageStorage::mark_processed_message_retryable()` method to support message retries after rollback or temporary failures. This is a breaking change because `ProcessedMessageState` is not marked `#[non_exhaustive]`, so downstream users must update exhaustive match statements to handle the new `Retryable` variant, and storage trait implementations must implement the new `mark_processed_message_retryable()` method. ([#161](https://github.com/marmot-protocol/mdk/pull/161))
 
 - **Snapshot API**: Added group-scoped snapshot management methods to `MdkStorageProvider` trait to support MIP-03 commit race resolution. Implementations must now provide: ([#152](https://github.com/marmot-protocol/mdk/pull/152))
   - `create_group_snapshot(group_id, name)`: Create a named snapshot of a group's current state
