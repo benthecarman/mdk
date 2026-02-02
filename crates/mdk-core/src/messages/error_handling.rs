@@ -504,7 +504,7 @@ mod tests {
     /// of previously failed events, mitigating DoS attacks.
     ///
     /// When a previously failed message cannot provide a valid group_id (missing or
-    /// malformed h-tag), we return an error to be explicit about the failure.
+    /// malformed h-tag), we return PreviouslyFailed to avoid crashing client apps.
     #[test]
     fn test_repeated_validation_failure_rejected_immediately() {
         let mdk = create_test_mdk();
@@ -520,18 +520,15 @@ mod tests {
         assert!(result1.is_err(), "First attempt should fail validation");
 
         // Second attempt - should be rejected immediately via deduplication
-        // Returns error because group_id cannot be extracted from malformed event
+        // Returns PreviouslyFailed because group_id cannot be extracted from malformed event
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error for malformed event without valid h-tag"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
@@ -584,7 +581,7 @@ mod tests {
     ///
     /// This test verifies the deduplication mechanism works for decryption failures,
     /// preventing expensive repeated decryption attempts. When the group doesn't exist
-    /// in storage, we return an error since we can't determine the MLS group ID.
+    /// in storage, we return PreviouslyFailed to avoid crashing client apps.
     #[test]
     fn test_repeated_decryption_failure_rejected_immediately() {
         let mdk = create_test_mdk();
@@ -602,26 +599,23 @@ mod tests {
         let result1 = mdk.process_message(&event);
         assert!(result1.is_err(), "First attempt should fail decryption");
 
-        // Second attempt - should return error because group isn't in storage
+        // Second attempt - should return PreviouslyFailed because group isn't in storage
         // (we can't determine the MLS group ID from just the Nostr group ID)
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error when group not in storage"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
-    /// Test that previously failed message without group in storage returns error
+    /// Test that previously failed message without group in storage returns PreviouslyFailed
     ///
     /// This test verifies that when a previously failed message has a valid h-tag
-    /// but the group doesn't exist in storage, we return an error since we can't
+    /// but the group doesn't exist in storage, we return PreviouslyFailed since we can't
     /// determine the MLS group ID (Nostr group ID != MLS group ID).
     #[test]
     fn test_previously_failed_message_without_group_in_storage() {
@@ -655,26 +649,23 @@ mod tests {
             "State should be Failed"
         );
 
-        // Second attempt - should return error because we can't determine MLS group ID
+        // Second attempt - should return PreviouslyFailed because we can't determine MLS group ID
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error when group not in storage"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
-    /// Test that previously failed message with oversized hex in h-tag returns error
+    /// Test that previously failed message with oversized hex in h-tag returns PreviouslyFailed
     ///
     /// This test verifies that when a previously failed message has an oversized hex string
     /// in the h-tag (potential DoS vector), the size check prevents decoding and returns
-    /// an explicit error.
+    /// PreviouslyFailed to avoid crashing client apps.
     #[test]
     fn test_previously_failed_message_with_oversized_hex() {
         let mdk = create_test_mdk();
@@ -703,25 +694,23 @@ mod tests {
             message_types::ProcessedMessageState::Failed
         );
 
-        // Second attempt - should return error due to malformed h-tag
+        // Second attempt - should return PreviouslyFailed due to malformed h-tag
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error for oversized hex"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
-    /// Test that previously failed message with undersized hex in h-tag returns error
+    /// Test that previously failed message with undersized hex in h-tag returns PreviouslyFailed
     ///
     /// This test verifies that when a previously failed message has an undersized hex string
-    /// in the h-tag, the size check prevents decoding and returns an explicit error.
+    /// in the h-tag, the size check prevents decoding and returns PreviouslyFailed to avoid
+    /// crashing client apps.
     #[test]
     fn test_previously_failed_message_with_undersized_hex() {
         let mdk = create_test_mdk();
@@ -750,18 +739,15 @@ mod tests {
             message_types::ProcessedMessageState::Failed
         );
 
-        // Second attempt - should return error due to malformed h-tag
+        // Second attempt - should return PreviouslyFailed due to malformed h-tag
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error for undersized hex"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
@@ -826,10 +812,10 @@ mod tests {
         }
     }
 
-    /// Test that previously failed message with invalid hex characters returns error
+    /// Test that previously failed message with invalid hex characters returns PreviouslyFailed
     ///
     /// This test verifies that when hex::decode fails due to invalid characters,
-    /// the code returns an explicit error.
+    /// the code returns PreviouslyFailed to avoid crashing client apps.
     #[test]
     fn test_previously_failed_message_with_invalid_hex_chars() {
         let mdk = create_test_mdk();
@@ -864,18 +850,15 @@ mod tests {
             message_types::ProcessedMessageState::Failed
         );
 
-        // Second attempt - should return error due to invalid hex
+        // Second attempt - should return PreviouslyFailed due to invalid hex
         let result2 = mdk.process_message(&event);
         assert!(
-            result2.is_err(),
-            "Second attempt should return error for invalid hex chars"
+            result2.is_ok(),
+            "Second attempt should return Ok(PreviouslyFailed), not error"
         );
         assert!(
-            result2
-                .unwrap_err()
-                .to_string()
-                .contains("Message processing previously failed"),
-            "Should indicate message previously failed"
+            matches!(result2.unwrap(), MessageProcessingResult::PreviouslyFailed),
+            "Should return PreviouslyFailed variant"
         );
     }
 
@@ -1005,6 +988,84 @@ mod tests {
             }
             _ => panic!("Expected Unprocessable variant"),
         }
+    }
+
+    /// Test that sanitize_error_reason covers all explicitly mapped error variants
+    /// and falls back to "processing_failed" for unmapped variants
+    #[test]
+    fn test_sanitize_error_reason_all_variants() {
+        use crate::MDK;
+        use mdk_memory_storage::MdkMemoryStorage;
+        use nostr::Kind;
+
+        // Test explicitly mapped error variants
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::UnexpectedEvent {
+                expected: Kind::MlsGroupMessage,
+                received: Kind::TextNote,
+            }),
+            "invalid_event_type"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::MissingGroupIdTag),
+            "invalid_event_format"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::InvalidGroupIdFormat(
+                "bad format".to_string()
+            )),
+            "invalid_event_format"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::MultipleGroupIdTags(3)),
+            "invalid_event_format"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::InvalidTimestamp(
+                "future timestamp".to_string()
+            )),
+            "invalid_event_format"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::GroupNotFound),
+            "group_not_found"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::CannotDecryptOwnMessage),
+            "own_message"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::AuthorMismatch),
+            "authentication_failed"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::CommitFromNonAdmin),
+            "authorization_failed"
+        );
+
+        // Test catch-all for unmapped variants (should return "processing_failed")
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::MessageNotFound),
+            "processing_failed"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::OwnLeafNotFound),
+            "processing_failed"
+        );
+
+        assert_eq!(
+            MDK::<MdkMemoryStorage>::sanitize_error_reason(&Error::ProcessMessageWrongEpoch(5)),
+            "processing_failed"
+        );
     }
 
     #[test]
