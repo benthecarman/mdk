@@ -121,8 +121,9 @@ impl GroupStorage for MdkMemoryStorage {
                 // Collect values from HashMap into a Vec for sorting
                 let mut messages: Vec<Message> = messages_map.values().cloned().collect();
 
-                // Sort by created_at DESC (newest first)
-                messages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                // Sort by created_at DESC, processed_at DESC, id DESC (newest first).
+                // Uses the centralized display_order_cmp (reversed for DESC).
+                messages.sort_by(|a, b| b.display_order_cmp(a));
 
                 // Apply pagination
                 let start = offset.min(messages.len());
@@ -272,6 +273,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -430,6 +432,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -445,17 +448,19 @@ mod tests {
             let event_id = EventId::from_slice(&[i as u8; 32]).unwrap();
             let wrapper_event_id = EventId::from_slice(&[100 + i as u8; 32]).unwrap();
 
+            let ts = Timestamp::from((1000 + i) as u64);
             let message = Message {
                 id: event_id,
                 pubkey,
                 kind: Kind::from(1u16),
                 mls_group_id: mls_group_id.clone(),
-                created_at: Timestamp::from((1000 + i) as u64),
+                created_at: ts,
+                processed_at: ts,
                 content: format!("Message {}", i),
                 tags: Tags::new(),
                 event: UnsignedEvent::new(
                     pubkey,
-                    Timestamp::from((1000 + i) as u64),
+                    ts,
                     Kind::from(9u16),
                     vec![],
                     format!("content {}", i),
@@ -552,6 +557,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -667,6 +673,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -687,6 +694,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -730,6 +738,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -756,6 +765,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,
@@ -800,6 +810,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -818,6 +829,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,

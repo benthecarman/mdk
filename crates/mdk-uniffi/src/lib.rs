@@ -1068,8 +1068,14 @@ pub struct Group {
     pub admin_pubkeys: Vec<String>,
     /// Last message event ID (hex-encoded)
     pub last_message_id: Option<String>,
-    /// Timestamp of last message (Unix timestamp)
+    /// Timestamp of last message (Unix timestamp, sender's `created_at`)
     pub last_message_at: Option<u64>,
+    /// Timestamp when the last message was processed/received (Unix timestamp)
+    ///
+    /// This differs from `last_message_at` which reflects the sender's timestamp.
+    /// `last_message_processed_at` reflects when this client received the message,
+    /// which may differ due to network delays or clock skew.
+    pub last_message_processed_at: Option<u64>,
     /// Current epoch number
     pub epoch: u64,
     /// Group state (e.g., "active", "archived")
@@ -1089,6 +1095,7 @@ impl From<group_types::Group> for Group {
             admin_pubkeys: g.admin_pubkeys.iter().map(|pk| pk.to_hex()).collect(),
             last_message_id: g.last_message_id.map(|id| id.to_hex()),
             last_message_at: g.last_message_at.map(|ts| ts.as_secs()),
+            last_message_processed_at: g.last_message_processed_at.map(|ts| ts.as_secs()),
             epoch: g.epoch,
             state: g.state.as_str().to_string(),
         }
@@ -1110,8 +1117,14 @@ pub struct Message {
     pub sender_pubkey: String,
     /// JSON representation of the event
     pub event_json: String,
-    /// Timestamp when message was created (Unix timestamp)
+    /// Timestamp when message was created by the sender (Unix timestamp).
+    /// Note: This timestamp comes from the sender's device and may differ
+    /// from `processed_at` due to clock skew between devices.
     pub created_at: u64,
+    /// Timestamp when this client processed/received the message (Unix timestamp).
+    /// This is useful for clients that want to display messages in the order
+    /// they were received locally, rather than in the order they were created.
+    pub processed_at: u64,
     /// Message kind
     pub kind: u16,
     /// Message state (e.g., "processed", "pending")
@@ -1142,6 +1155,7 @@ impl From<message_types::Message> for Message {
             sender_pubkey: m.pubkey.to_hex(),
             event_json,
             created_at: m.created_at.as_secs(),
+            processed_at: m.processed_at.as_secs(),
             kind: m.kind.as_u16(),
             state: m.state.as_str().to_string(),
         }

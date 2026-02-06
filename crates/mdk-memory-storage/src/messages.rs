@@ -271,6 +271,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -297,22 +298,18 @@ mod tests {
     ) -> Message {
         let pubkey = Keys::generate().public_key();
         let wrapper_event_id = EventId::from_slice(&[200u8; 32]).unwrap();
+        let ts = Timestamp::from(timestamp);
 
         Message {
             id: event_id,
             pubkey,
             kind: Kind::from(1u16),
             mls_group_id: group_id,
-            created_at: Timestamp::from(timestamp),
+            created_at: ts,
+            processed_at: ts,
             content: content.to_string(),
             tags: Tags::new(),
-            event: UnsignedEvent::new(
-                pubkey,
-                Timestamp::from(timestamp),
-                Kind::from(9u16),
-                vec![],
-                content.to_string(),
-            ),
+            event: UnsignedEvent::new(pubkey, ts, Kind::from(9u16), vec![], content.to_string()),
             wrapper_event_id,
             epoch,
             state: MessageState::Created,

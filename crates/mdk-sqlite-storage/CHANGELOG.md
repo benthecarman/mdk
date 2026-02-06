@@ -27,12 +27,17 @@
 
 ### Added
 
+- **Group `last_message_processed_at` Column**: Added `last_message_processed_at` column to the `groups` table via V003 migration to track when the last message was processed/received by this client. This enables consistent ordering between `group.last_message_id` and `get_messages()[0].id`. Existing groups are backfilled with their `last_message_at` value as a reasonable default. ([#166](https://github.com/marmot-protocol/mdk/pull/166))
+
+- **Message `processed_at` Column**: Added `processed_at` column to the `messages` table via V002 migration to store when messages were processed/received by the client. Existing messages are backfilled with their `created_at` value as a reasonable default. ([#166](https://github.com/marmot-protocol/mdk/pull/166))
+
 - **Retryable Message Support**: Updated storage implementation to handle `ProcessedMessageState::Retryable` transitions and persistence. ([#161](https://github.com/marmot-protocol/mdk/pull/161))
 
 ### Breaking changes
 
 ### Changed
 
+- **Message Sorting**: The `messages()` query now uses `ORDER BY created_at DESC, processed_at DESC, id DESC`. The secondary sort by `processed_at` keeps messages in reception order when `created_at` is the same. The tertiary sort by `id` ensures deterministic ordering. A new composite index `idx_messages_sorting` supports this query. ([#166](https://github.com/marmot-protocol/mdk/pull/166))
 - Upgraded `nostr` dependency from 0.43 to 0.44, replacing deprecated `Timestamp::as_u64()` calls with `Timestamp::as_secs()` ([#162](https://github.com/marmot-protocol/mdk/pull/162))
 - **Persistent Snapshots**: Implemented snapshot support by copying group-specific rows to a dedicated snapshot table. `create_group_snapshot`, `rollback_group_to_snapshot`, and `release_group_snapshot` persist across app restarts. ([#152](https://github.com/marmot-protocol/mdk/pull/152))
 - **Unified Storage Architecture**: `MdkSqliteStorage` now directly implements OpenMLS's `StorageProvider<1>` trait instead of wrapping `openmls_sqlite_storage`. This enables atomic transactions across MLS and MDK state, which is required for proper commit race resolution per MIP-03. ([#148](https://github.com/marmot-protocol/mdk/pull/148))

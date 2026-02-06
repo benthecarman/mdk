@@ -1624,6 +1624,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -1667,6 +1668,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -1712,6 +1714,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -1862,6 +1865,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -1874,17 +1878,19 @@ mod tests {
         let pubkey =
             PublicKey::from_hex("aabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabb")
                 .unwrap();
+        let now = Timestamp::now();
         let message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Hello, world!".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Hello, world!".to_string(),
@@ -1953,17 +1959,19 @@ mod tests {
         let pubkey =
             PublicKey::from_hex("aabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabb")
                 .unwrap();
+        let now = Timestamp::now();
         let message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: nonexistent_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Hello, world!".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Hello, world!".to_string(),
@@ -2004,6 +2012,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2017,17 +2026,19 @@ mod tests {
         let pubkey =
             PublicKey::from_hex("aabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabb")
                 .unwrap();
+        let now = Timestamp::now();
         let original_message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Original message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Original message".to_string(),
@@ -2097,6 +2108,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2110,6 +2122,7 @@ mod tests {
                 .unwrap();
 
         // Create and save first message
+        let now = Timestamp::now();
         let event_id_1 =
             EventId::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
                 .unwrap();
@@ -2119,12 +2132,13 @@ mod tests {
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "First message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "First message".to_string(),
@@ -2145,12 +2159,13 @@ mod tests {
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Second message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Second message".to_string(),
@@ -2212,6 +2227,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2221,17 +2237,19 @@ mod tests {
         nostr_storage.save_group(group).unwrap();
 
         // Try to save a message for a non-existent group
+        let now = Timestamp::now();
         let message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: nonexistent_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Hello, world!".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Hello, world!".to_string(),
@@ -2288,6 +2306,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -2324,6 +2343,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash,
@@ -2356,6 +2376,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2410,6 +2431,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2425,17 +2447,19 @@ mod tests {
         let event_id =
             EventId::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
                 .unwrap();
+        let now = Timestamp::now();
         let message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Original message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Original message".to_string(),
@@ -2458,12 +2482,13 @@ mod tests {
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Second message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Second message".to_string(),
@@ -2513,6 +2538,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2548,6 +2574,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,
@@ -2617,6 +2644,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2667,6 +2695,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2782,6 +2811,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2805,6 +2835,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2820,17 +2851,19 @@ mod tests {
         let event_id =
             EventId::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
                 .unwrap();
+        let now = Timestamp::now();
         let message = Message {
             id: event_id,
             pubkey,
             kind: Kind::MlsGroupMessage,
             mls_group_id: mls_group_id_1.clone(),
-            created_at: Timestamp::now(),
+            created_at: now,
+            processed_at: now,
             content: "Test message".to_string(),
             tags: Tags::new(),
             event: UnsignedEvent::new(
                 pubkey,
-                Timestamp::now(),
+                now,
                 Kind::MlsGroupMessage,
                 Tags::new(),
                 "Test message".to_string(),
@@ -2850,6 +2883,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 5,
             state: GroupState::Active,
             image_hash: None,
@@ -2903,6 +2937,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 0,
             state: GroupState::Active,
             image_hash: None,
@@ -2989,6 +3024,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 5,
             state: GroupState::Active,
             image_hash: None,
@@ -3004,6 +3040,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 10,
             state: GroupState::Active,
             image_hash: None,
@@ -3097,6 +3134,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,
@@ -3112,6 +3150,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,
@@ -3217,6 +3256,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,
@@ -3275,6 +3315,7 @@ mod tests {
             admin_pubkeys: BTreeSet::new(),
             last_message_id: None,
             last_message_at: None,
+            last_message_processed_at: None,
             epoch: 1,
             state: GroupState::Active,
             image_hash: None,

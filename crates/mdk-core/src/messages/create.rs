@@ -5,7 +5,7 @@
 use mdk_storage_traits::groups::types as group_types;
 use mdk_storage_traits::messages::types as message_types;
 use mdk_storage_traits::{GroupId, MdkStorageProvider};
-use nostr::{Event, EventId, JsonUtil, UnsignedEvent};
+use nostr::{Event, EventId, JsonUtil, Timestamp, UnsignedEvent};
 use openmls::prelude::MlsGroup;
 use openmls_basic_credential::SignatureKeyPair;
 use tls_codec::Serialize as TlsSerialize;
@@ -103,12 +103,14 @@ where
         let event = self.build_message_event(mls_group_id, message)?;
 
         // Create message to save to storage
+        let now = Timestamp::now();
         let message: message_types::Message = message_types::Message {
             id: rumor_id,
             pubkey: rumor.pubkey,
             kind: rumor.kind,
             mls_group_id: mls_group_id.clone(),
             created_at: rumor.created_at,
+            processed_at: now,
             content: rumor.content.clone(),
             tags: rumor.tags.clone(),
             event: rumor.clone(),
@@ -131,9 +133,9 @@ where
         self.save_message_record(message.clone())?;
         self.save_processed_message_record(processed_message)?;
 
-        // Update last_message_at and last_message_id
-        group.last_message_at = Some(rumor.created_at);
-        group.last_message_id = Some(message.id);
+        // Update last_message_at, last_message_processed_at, and last_message_id using
+        // the canonical display-order comparison.
+        group.update_last_message_if_newer(&message);
         self.save_group_record(group)?;
 
         Ok(event)
