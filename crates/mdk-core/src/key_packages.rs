@@ -1,4 +1,4 @@
-//! Nostr MLS Key Packages
+//! MDK Key Packages
 
 use mdk_storage_traits::MdkStorageProvider;
 use mdk_storage_traits::mls_codec::JsonCodec;
