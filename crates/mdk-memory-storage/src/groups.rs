@@ -287,6 +287,51 @@ impl GroupStorage for MdkMemoryStorage {
 
         Ok(())
     }
+
+    fn search_messages(
+        &self,
+        query: &str,
+        group_id: Option<&GroupId>,
+        limit: usize,
+    ) -> Result<Vec<Message>, GroupError> {
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let limit = limit.min(MAX_MESSAGE_LIMIT);
+        let query_lower = query.to_lowercase();
+        let inner = self.inner.read();
+
+        let mut results = Vec::new();
+
+        let group_ids: Vec<GroupId> = match group_id {
+            Some(gid) => vec![gid.clone()],
+            None => inner
+                .messages_by_group_cache
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect(),
+        };
+
+        for gid in &group_ids {
+            if let Some(messages_map) = inner.messages_by_group_cache.peek(gid) {
+                for msg in messages_map.values() {
+                    if msg.kind == nostr::Kind::ChatMessage
+                        && msg.state == mdk_storage_traits::messages::types::MessageState::Processed
+                        && msg.content.to_lowercase().contains(&query_lower)
+                    {
+                        results.push(msg.clone());
+                    }
+                }
+            }
+        }
+
+        // Sort by created_at DESC
+        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.truncate(limit);
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
