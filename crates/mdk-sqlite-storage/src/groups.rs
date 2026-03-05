@@ -418,6 +418,13 @@ impl GroupStorage for MdkSqliteStorage {
         }
 
         self.with_connection(|conn| {
+            // Rebuild the FTS index from the source table to ensure it is
+            // up-to-date.  This is a no-op when the index already matches and
+            // is fast for chat-scale data volumes.
+            let _ = conn.execute_batch(
+                "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');",
+            );
+
             let (sql, boxed_params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match group_id
             {
                 Some(gid) => (
